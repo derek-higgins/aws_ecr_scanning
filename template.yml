@@ -1,0 +1,108 @@
+Resources:
+  Schedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      ScheduleExpression: rate(1 minute)
+      FlexibleTimeWindow:
+        Mode: 'OFF'
+      Target:
+        Arn: !GetAtt StartImageScanning.Arn
+        RoleArn: !GetAtt ScheduleToStartImageScanningRole.Arn
+  StartImageScanning:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: !Sub
+        - Stack ${AWS::StackName} Function ${ResourceName}
+        - ResourceName: StartImageScanning
+      CodeUri: src/StartScanningContainers
+      Handler: handler.handler
+      Runtime: python3.11
+      MemorySize: 3008
+      Timeout: 300
+      Tracing: Active
+  StartImageScanningLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${StartImageScanning}
+  ScheduleToStartImageScanningRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          Effect: Allow
+          Principal:
+            Service: !Sub scheduler.${AWS::URLSuffix}
+          Action: sts:AssumeRole
+          Condition:
+            ArnLike:
+              aws:SourceArn: !Sub
+                - arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/*/${AWS::StackName}-${ResourceId}-*
+                - ResourceId: Schedule
+      Policies:
+        - PolicyName: StartExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt StartImageScanning.Arn
+  SaveScanningResult:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: !Sub
+        - Stack ${AWS::StackName} Function ${ResourceName}
+        - ResourceName: SaveScanningResult
+      CodeUri: src/SaveScanningResult
+      Handler: handler.handler
+      Runtime: python3.11
+      MemorySize: 3008
+      Timeout: 30
+      Tracing: Active
+      Environment:
+        Variables:
+          FINDINGS_TABLE_NAME: !Ref ECRScanningResults
+          ECRSCANNINGRESULTS_TABLE_ARN: !GetAtt ECRScanningResults.Arn
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ECRScanningResults
+  SaveScanningResultLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SaveScanningResult}
+  ECRScanningResults:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+  ECRImageScanComplete:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern:
+        source:
+          - aws.ecr
+        detail-type:
+          - ECR Image Scan
+        detail:
+          scan-status:
+            - COMPLETE
+      Targets:
+        - Id: !Ref SaveScanningResult
+          Arn: !GetAtt SaveScanningResult.Arn
+  ECRImageScanCompleteToSaveScanningResultConnector:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SaveScanningResult.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ECRImageScanComplete.Arn
+Transform: AWS::Serverless-2016-10-31
